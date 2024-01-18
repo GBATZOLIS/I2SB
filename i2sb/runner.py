@@ -157,7 +157,7 @@ class Runner(object):
         train_loader = util.setup_loader(train_dataset, opt.microbatch)
         val_loader   = util.setup_loader(val_dataset,   opt.microbatch)
 
-        self.accuracy = torchmetrics.Accuracy().to(opt.device)
+        self.accuracy = torchmetrics.Accuracy(task='multiclass', num_classes=1000).to(opt.device)
         self.resnet = build_resnet50().to(opt.device)
 
         net.train()
@@ -196,10 +196,10 @@ class Runner(object):
                 "{:.2e}".format(optimizer.param_groups[0]['lr']),
                 "{:+.4f}".format(loss.item()),
             ))
-            if it % 10 == 0:
+            if (it+1) % 10 == 0:
                 self.writer.add_scalar(it, 'loss', loss.detach())
 
-            if it % 5000 == 0:
+            if (it+1) % 5000 == 0:
                 if opt.global_rank == 0:
                     torch.save({
                         "net": self.net.state_dict(),
@@ -211,9 +211,9 @@ class Runner(object):
                 if opt.distributed:
                     torch.distributed.barrier()
 
-            if it == 500 or it % 3000 == 0: # 0, 0.5k, 3k, 6k 9k
+            if (it+1) == 500 or (it+1) % 3000 == 0: # 0, 0.5k, 3k, 6k 9k
                 net.eval()
-                self.evaluation(opt, it, val_loader, corrupt_method)
+                self.evaluation(opt, it+1, val_loader, corrupt_method)
                 net.train()
         self.writer.close()
 

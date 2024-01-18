@@ -29,6 +29,8 @@ from i2sb import Runner, download_ckpt
 import colored_traceback.always
 from ipdb import set_trace as debug
 
+os.environ["CUDA_VISIBLE_DEVICES"] = '1,2'
+
 RESULT_DIR = Path("results")
 
 def set_seed(seed):

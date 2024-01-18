@@ -17,6 +17,7 @@ from torchvision import transforms
 from torch.utils.data import Dataset
 
 from ipdb import set_trace as debug
+from tqdm import tqdm 
 
 def lmdb_loader(path, lmdb_data):
     # In-memory binary streams
@@ -35,6 +36,7 @@ def _build_lmdb_dataset(
     valid_data = _build_lmdb_dataset(validdir, transform=val_transform)
     """
 
+    print(f'root:{root}')
     root = str(root)
     if root.endswith('/'):
         root = root[:-1]
@@ -52,11 +54,16 @@ def _build_lmdb_dataset(
         torch.save(data_set, pt_path, pickle_protocol=4)
         log.info('[Dataset] Saving pt to {}'.format(pt_path))
         log.info('[Dataset] Building lmdb to {}'.format(lmdb_path))
-        env = lmdb.open(lmdb_path, map_size=1e12)
+
+        allocate_ram_memory_in_gbs = 70 #set it 200GB for the full ImageNet dataset.
+        allocated_bytes = allocate_ram_memory_in_gbs * (1024 ** 3)
+        env = lmdb.open(lmdb_path, map_size=allocated_bytes)
         with env.begin(write=True) as txn:
-            for _path, class_index in data_set.imgs:
+            for _path, class_index in tqdm(data_set.imgs):
                 with open(_path, 'rb') as f:
                     data = f.read()
+                
+                #print(data)
                 txn.put(_path.encode('ascii'), data)
     data_set.lmdb_data = lmdb.open(
         lmdb_path, readonly=True, max_readers=1, lock=False, readahead=False,

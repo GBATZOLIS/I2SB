@@ -60,7 +60,9 @@ def build_subset_per_gpu(opt, dataset, log):
 
 def collect_all_subset(sample, log):
     batch, *xdim = sample.shape
-    gathered_samples = dist_util.all_gather(sample, log)
+    # Ensure the tensor is contiguous
+    contiguous_sample = sample.contiguous()
+    gathered_samples = dist_util.all_gather(contiguous_sample, log)
     gathered_samples = [sample.cpu() for sample in gathered_samples]
     # [batch, n_gpu, *xdim] --> [batch*n_gpu, *xdim]
     return torch.stack(gathered_samples, dim=1).reshape(-1, *xdim)
@@ -82,6 +84,8 @@ def build_partition(opt, full_dataset, log):
     return subset
 
 def build_val_dataset(opt, log, corrupt_type):
+    val_dataset = imagenet.build_lmdb_dataset(opt, log, train=False) # full 50k val
+    '''
     if "sr4x" in corrupt_type:
         val_dataset = imagenet.build_lmdb_dataset(opt, log, train=False) # full 50k val
     elif "inpaint" in corrupt_type:
@@ -93,7 +97,7 @@ def build_val_dataset(opt, log, corrupt_type):
         val_dataset = MixtureCorruptDatasetVal(opt, val_dataset) # subset 10k val + mixture
     else:
         val_dataset = imagenet.build_lmdb_dataset_val10k(opt, log) # subset 10k val
-
+    '''
     # build partition
     if opt.partition is not None:
         val_dataset = build_partition(opt, val_dataset, log)
