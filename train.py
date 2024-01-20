@@ -29,7 +29,7 @@ from i2sb import Runner, download_ckpt
 import colored_traceback.always
 from ipdb import set_trace as debug
 
-os.environ["CUDA_VISIBLE_DEVICES"] = '1,2'
+os.environ["CUDA_VISIBLE_DEVICES"] = '0,1,2,3'
 
 RESULT_DIR = Path("results")
 
@@ -58,6 +58,7 @@ def create_training_options():
     # --------------- SB model ---------------
     parser.add_argument("--image-size",     type=int,   default=256)
     parser.add_argument("--corrupt",        type=str,   default=None,        help="restoration task")
+    parser.add_argument("--vae-model-name", type=str,   default='stabilityai/sd-vae-ft-ema', help="Diffusers stability AI vae - ema weights")
     parser.add_argument("--t0",             type=float, default=1e-4,        help="sigma start time in network parametrization")
     parser.add_argument("--T",              type=float, default=1.,          help="sigma end time in network parametrization")
     parser.add_argument("--interval",       type=int,   default=1000,        help="number of interval")
@@ -82,6 +83,7 @@ def create_training_options():
 
     # --------------- path and logging ---------------
     parser.add_argument("--dataset-dir",    type=Path,  default="/dataset",  help="path to LMDB dataset")
+    parser.add_argument("--dataset-transform",    type=str,  default=None,  help="dataset transformation sequence")
     parser.add_argument("--log-dir",        type=Path,  default=".log",      help="path to log std outputs and writer data")
     parser.add_argument("--log-writer",     type=str,   default=None,        help="log writer: can be tensorbard, wandb, or None")
     parser.add_argument("--wandb-api-key",  type=str,   default=None,        help="unique API key of your W&B account; see https://wandb.ai/authorize")
@@ -129,8 +131,8 @@ def main(opt):
         set_seed(opt.seed + opt.global_rank)
 
     # build imagenet dataset
-    train_dataset = imagenet.build_lmdb_dataset(opt, log, train=True)
-    val_dataset   = imagenet.build_lmdb_dataset(opt, log, train=False)
+    train_dataset = imagenet.build_lmdb_dataset(opt, log, train=True, transform=opt.dataset_transform)
+    val_dataset   = imagenet.build_lmdb_dataset(opt, log, train=False, transform=opt.dataset_transform)
     # note: images should be normalized to [-1,1] for corruption methods to work properly
 
     if opt.corrupt == "mixture":

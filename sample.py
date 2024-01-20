@@ -84,7 +84,7 @@ def build_partition(opt, full_dataset, log):
     return subset
 
 def build_val_dataset(opt, log, corrupt_type):
-    val_dataset = imagenet.build_lmdb_dataset(opt, log, train=False) # full 50k val
+    val_dataset = imagenet.build_lmdb_dataset(opt, log, train=False, transform=opt.dataset_transform) # full 50k val
     '''
     if "sr4x" in corrupt_type:
         val_dataset = imagenet.build_lmdb_dataset(opt, log, train=False) # full 50k val
@@ -225,6 +225,8 @@ if __name__ == '__main__':
     # data
     parser.add_argument("--image-size",     type=int,  default=256)
     parser.add_argument("--dataset-dir",    type=Path, default="/dataset",  help="path to LMDB dataset")
+    parser.add_argument("--vae-model-name", type=str,   default='stabilityai/sd-vae-ft-ema', help="Diffusers stability AI vae - ema weights")
+    parser.add_argument("--dataset-transform",    type=str,  default=None,  help="dataset transformation sequence")
     parser.add_argument("--partition",      type=str,  default=None,        help="e.g., '0_4' means the first 25% of the dataset")
 
     # sample

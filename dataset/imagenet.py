@@ -18,6 +18,7 @@ from torch.utils.data import Dataset
 
 from ipdb import set_trace as debug
 from tqdm import tqdm 
+import numpy as np
 
 def lmdb_loader(path, lmdb_data):
     # In-memory binary streams
@@ -55,7 +56,7 @@ def _build_lmdb_dataset(
         log.info('[Dataset] Saving pt to {}'.format(pt_path))
         log.info('[Dataset] Building lmdb to {}'.format(lmdb_path))
 
-        allocate_ram_memory_in_gbs = 70 #set it 200GB for the full ImageNet dataset.
+        allocate_ram_memory_in_gbs = 200 #set it 200GB for the full ImageNet dataset.
         allocated_bytes = allocate_ram_memory_in_gbs * (1024 ** 3)
         env = lmdb.open(lmdb_path, map_size=allocated_bytes)
         with env.begin(write=True) as txn:
@@ -75,6 +76,42 @@ def _build_lmdb_dataset(
     data_set.loader = lambda path: loader(path, data_set.lmdb_data)
 
     return data_set
+
+def center_crop_arr(pil_image, image_size):
+    """
+    Center cropping implementation from ADM.
+    https://github.com/openai/guided-diffusion/blob/8fb3ad9197f16bbc40620447b2742e13458d2831/guided_diffusion/image_datasets.py#L126
+    """
+    while min(*pil_image.size) >= 2 * image_size:
+        pil_image = pil_image.resize(
+            tuple(x // 2 for x in pil_image.size), resample=Image.BOX
+        )
+
+    scale = image_size / min(*pil_image.size)
+    pil_image = pil_image.resize(
+        tuple(round(x * scale) for x in pil_image.size), resample=Image.BICUBIC
+    )
+
+    arr = np.array(pil_image)
+    crop_y = (arr.shape[0] - image_size) // 2
+    crop_x = (arr.shape[1] - image_size) // 2
+    return Image.fromarray(arr[crop_y: crop_y + image_size, crop_x: crop_x + image_size])
+
+def build_DiT_train_transform(image_size):
+    return transforms.Compose([
+        transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, image_size)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
+    ])
+
+def build_DiT_test_transform(image_size):
+    return transforms.Compose([
+        transforms.Lambda(lambda pil_image: center_crop_arr(pil_image, image_size)),
+        #transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5], inplace=True)
+    ])
 
 def build_train_transform(image_size):
     return transforms.Compose([
@@ -100,6 +137,9 @@ def build_lmdb_dataset(opt, log, train, transform=None):
 
     if transform is None:
         build_transform = build_train_transform if train else build_test_transform
+        transform = build_transform(opt.image_size)
+    elif transform == 'DiT':
+        build_transform = build_DiT_train_transform if train else build_DiT_test_transform
         transform = build_transform(opt.image_size)
 
     dataset = _build_lmdb_dataset(fn, log, transform=transform)

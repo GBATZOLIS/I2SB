@@ -37,6 +37,12 @@ def build_corruption(opt, log, corrupt_type=None):
 
     elif 'mixture' in corrupt_type:
         method = None #
+    
+    elif 'vae' in corrupt_type:
+        from .vae_corruption import build_vae_corruption
+        vae_model_name = opt.vae_model_name
+        method = build_vae_corruption(opt, log, vae_model_name)
+        
     else:
         raise RuntimeWarning(f"Unknown corruption: {corrupt_type}!")
 
