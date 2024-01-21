@@ -47,6 +47,7 @@ def create_training_options():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed",           type=int,   default=0)
     parser.add_argument("--name",           type=str,   default=None,        help="experiment ID")
+    parser.add_argument("--pretrained-ckpt-path", type=str, default=None,    help="path to the pre-trained checkpoint")
     parser.add_argument("--ckpt",           type=str,   default=None,        help="resumed checkpoint name")
     parser.add_argument("--gpu",            type=int,   default=None,        help="set only if you wish to run on a particular device")
     parser.add_argument("--n-gpu-per-node", type=int,   default=1,           help="number of gpu on each node")
@@ -107,12 +108,24 @@ def create_training_options():
     opt.ckpt_path = RESULT_DIR / opt.name
     os.makedirs(opt.ckpt_path, exist_ok=True)
 
-    if opt.ckpt is not None:
-        ckpt_file = RESULT_DIR / opt.ckpt / "latest.pt"
-        assert ckpt_file.exists()
-        opt.load = ckpt_file
+    resume_ckpt_path = opt.ckpt_path / "latest.pt"
+    resume_path_exists = resume_ckpt_path.exists()
+
+    if resume_path_exists:
+        opt.load = resume_ckpt_path
     else:
-        opt.load = None
+        if opt.pretrained_ckpt_path:
+            opt.load = opt.pretrained_ckpt_path
+        else:
+            opt.load = None
+        
+
+    #if opt.ckpt is not None:
+    #    ckpt_file = RESULT_DIR / opt.ckpt / "latest.pt"
+    #    assert ckpt_file.exists()
+    #    opt.load = ckpt_file
+    #else:
+    #    opt.load = None
 
     # ========= auto assert =========
     assert opt.batch_size % opt.microbatch == 0, f"{opt.batch_size=} is not dividable by {opt.microbatch}!"
