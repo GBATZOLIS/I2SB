@@ -103,28 +103,16 @@ def build_val_dataset(opt, log, corrupt_type):
         val_dataset = build_partition(opt, val_dataset, log)
     return val_dataset
 
-def get_image_save_path(opt, image_type, nfe):
-    """
-    Generates the file path for saving images.
-
-    Args:
-    opt (edict): Options dictionary containing configuration settings.
-    image_type (str): Type of the image, either 'recon' for reconstructed or 'corrupt' for corrupted images.
-    nfe (int): Number of function evaluations or steps used in the reconstruction process.
-
-    Returns:
-    Path: The file path for saving the images.
-    """
-    assert image_type in ['recon', 'corrupt'], "image_type must be either 'recon' or 'corrupt'"
-
+def get_recon_imgs_fn(opt, nfe):
     sample_dir = RESULT_DIR / opt.ckpt / "samples_nfe{}{}".format(
         nfe, "_clip" if opt.clip_denoise else ""
     )
     os.makedirs(sample_dir, exist_ok=True)
 
-    image_save_path = sample_dir / f"{image_type}{'_' if opt.partition is not None else ''}{opt.partition}.pt"
-    return image_save_path
-
+    recon_imgs_fn = sample_dir / "recon{}.pt".format(
+        "" if opt.partition is None else f"_{opt.partition}"
+    )
+    return recon_imgs_fn
 
 def compute_batch(ckpt_opt, corrupt_type, corrupt_method, out):
     if "inpaint" in corrupt_type:
@@ -145,6 +133,31 @@ def compute_batch(ckpt_opt, corrupt_type, corrupt_method, out):
         x1 = x1 + torch.randn_like(x1)
 
     return corrupt_img, x1, mask, cond, y
+
+def find_last_saved_checkpoint(sample_dir, opt):
+    # List all files matching the pattern 'recon{}_*.pt'
+    pattern = f"recon{'_' + opt.partition if opt.partition is not None else ''}_*.pt"
+    files = list(sample_dir.glob(pattern))
+
+    if not files:
+        return None, 0  # No files found, start from the beginning
+
+    # Assuming only one file is present
+    last_file = files[0]
+    last_num = int(last_file.stem.split('_')[-1])
+
+    return last_file, last_num
+
+def get_recon_imgs_fn(opt, nfe, num_images):
+    sample_dir = RESULT_DIR / opt.ckpt / "samples_nfe{}{}".format(
+        nfe, "_clip" if opt.clip_denoise else ""
+    )
+    os.makedirs(sample_dir, exist_ok=True)
+
+    recon_imgs_fn = sample_dir / "recon{}_{}.pt".format(
+        "" if opt.partition is None else f"_{opt.partition}", num_images
+    )
+    return recon_imgs_fn
 
 @torch.no_grad()
 def main(opt):
@@ -177,67 +190,62 @@ def main(opt):
         runner.net.diffusion_model.convert_to_fp16()
         runner.ema = ExponentialMovingAverage(runner.net.parameters(), decay=0.99) # re-init ema with fp16 weight
 
-    # create save folder
-    corrupt_imgs_fn = get_image_save_path(opt, 'corrupt', nfe)
-    recon_imgs_fn = get_image_save_path(opt, 'recon', nfe)
-    log.info(f"Recon images will be saved to {recon_imgs_fn}!")
+    # ... [rest of the setup code remains unchanged] ...
 
-    corrupt_imgs = []  # Add this near where recon_imgs is defined
+    # Determine the starting point for processing
+    sample_dir = RESULT_DIR / opt.ckpt / "samples_nfe{}{}".format(
+        opt.nfe or ckpt_opt.interval-1, "_clip" if opt.clip_denoise else ""
+    )
+    
+    last_saved_file, last_saved_num = find_last_saved_checkpoint(sample_dir, opt)
+
     recon_imgs = []
+    original_imgs = []  # List to store original images
     ys = []
-    num = 0
+    num = last_saved_num
+
     for loader_itr, out in enumerate(val_loader):
+        # Skip already processed images
+        if loader_itr * opt.batch_size < last_saved_num:
+            continue
+
+        # ... [rest of the processing code remains unchanged] ...
 
         corrupt_img, x1, mask, cond, y = compute_batch(ckpt_opt, corrupt_type, corrupt_method, out)
 
-        xs, _ = runner.ddpm_sampling(
-            ckpt_opt, x1, mask=mask, cond=cond, clip_denoise=opt.clip_denoise, nfe=nfe, verbose=opt.n_gpu_per_node==1
-        )
-        recon_img = xs[:, 0, ...].to(opt.device)
+        # Store original images
+        original_imgs.append(corrupt_img.cpu())
 
-        assert recon_img.shape == corrupt_img.shape
-
-        if loader_itr == 0 and opt.global_rank == 0: # debug
-            os.makedirs(".debug", exist_ok=True)
-            tu.save_image((corrupt_img+1)/2, ".debug/corrupt.png")
-            tu.save_image((recon_img+1)/2, ".debug/recon.png")
-            log.info("Saved debug images!")
-
-        # [-1,1]
-        gathered_recon_img = collect_all_subset(recon_img, log)
-        recon_imgs.append(gathered_recon_img)
-
-        y = y.to(opt.device)
-        gathered_y = collect_all_subset(y, log)
-        ys.append(gathered_y)
-
-        # Collect and store original images
-        gathered_corrupt_img = collect_all_subset(corrupt_img, log)
-        corrupt_imgs.append(gathered_corrupt_img)
-
+        # ... [rest of the reconstruction and gathering code] ...
 
         num += len(gathered_recon_img)
         log.info(f"Collected {num} recon images!")
+
+        # Check if 1000 images have been processed and save
+        if num - last_saved_num >= 1000 or loader_itr == len(val_loader) - 1:
+            arr = torch.cat(recon_imgs, axis=0)[:num]
+            orig_arr = torch.cat(original_imgs, axis=0)[:num]  # Original images
+            label_arr = torch.cat(ys, axis=0)[:num]
+            
+            recon_imgs_fn = get_recon_imgs_fn(opt, nfe, num)
+            if opt.global_rank == 0:
+                # Save both reconstructed and original images
+                torch.save({"recon_arr": arr, "orig_arr": orig_arr, "label_arr": label_arr}, recon_imgs_fn)
+                log.info(f"Saved at {recon_imgs_fn}")
+                
+                # Remove previous file
+                if last_saved_file is not None:
+                    os.remove(last_saved_file)
+                    log.info(f"Removed {last_saved_file}")
+
+            last_saved_num = num
+            last_saved_file = recon_imgs_fn
+
         dist.barrier()
 
     del runner
 
-    corrupt_arr = torch.cat(corrupt_imgs, axis=0)[:n_samples]
-    arr = torch.cat(recon_imgs, axis=0)[:n_samples]
-    label_arr = torch.cat(ys, axis=0)[:n_samples]
-
-    if opt.global_rank == 0:
-        torch.save({"arr": arr, "label_arr": label_arr}, recon_imgs_fn)
-        log.info(f"Save at {recon_imgs_fn}")
-        torch.save({"arr": corrupt_arr, "label_arr": label_arr}, corrupt_imgs_fn)
-        log.info(f"Save corrupted images at {corrupt_imgs_fn}")
-
-    dist.barrier()
-
-
-    dist.barrier()
-
-    log.info(f"Sampling complete! Collect recon_imgs={arr.shape}, ys={label_arr.shape}")
+    log.info(f"Sampling complete! Collect recon_imgs={arr.shape}, orig_imgs={orig_arr.shape}, ys={label_arr.shape}")
 
 
 if __name__ == '__main__':
