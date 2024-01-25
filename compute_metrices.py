@@ -102,6 +102,20 @@ def find_recon_imgs_pts(opt, log):
     assert len(recon_imgs_pts) > 0, f"Found 0 file that matches '{str(sample_dir)}/recon_*.pt'!"
     return recon_imgs_pts
 
+def find_imgs_pts(opt, log, name = 'recon'):
+    sample_dir = RESULT_DIR / opt.ckpt / opt.sample_dir
+
+    recon_imgs_pt = sample_dir / f"{name}.pt"
+    if recon_imgs_pt.exists():
+        log.info(f"Found {name}.pt in dir={str(sample_dir)}!")
+        return [recon_imgs_pt,]
+
+    log.info(f"Finding partition pt files in dir={str(sample_dir)} ...")
+    recon_imgs_pts = [pt for pt in sample_dir.glob(f'{name}_*.pt')]
+    assert len(recon_imgs_pts) > 0, f"Found 0 file that matches '{str(sample_dir)}/{name}_*.pt'!"
+    return recon_imgs_pts
+
+
 def build_numpy_data(log, recon_imgs_pts):
     arr = []
     label_arr = []
@@ -135,26 +149,34 @@ def get_ref_fid(opt, log):
     with open(RESULT_DIR / opt.ckpt / "options.pkl", "rb") as f:
         ckpt_opt = pickle.load(f)
 
-    # we use train set for super-res and val set for the rest of the tasks
-    split = "train" if 'sr4x' in ckpt_opt.corrupt else "val"
+    # use train set for super-resolution and VAE, val set for the rest
+    if ckpt_opt.corrupt in ['sr4x', 'vae']:
+        split = "train"
+    else:
+        split = "val"
 
     # build npz file
     if split == "train":
         ref_fid_fn = Path("data/VIRTUAL_imagenet256_labeled.npz")
         if not ref_fid_fn.exists():
-            log.info(f"Downloading {ref_fid_fn=} (this can take a while ...)")
+            log.info(f"Downloading training statistics for FID ({ref_fid_fn=}). This can take a while ...")
             download(ADM_IMG256_FID_TRAIN_REF_CKPT, ref_fid_fn)
+        else:
+            log.info(f"Using existing training statistics for FID from {ref_fid_fn}.")
     elif split == "val":
         ref_fid_fn = Path("data/fid_imagenet_256_val.npz")
         if not ref_fid_fn.exists():
-            log.info(f"Generating {ref_fid_fn=} (this can take a while ...)")
+            log.info(f"Generating validation statistics for FID ({ref_fid_fn=}). This can take a while ...")
             ref_opt = build_ref_opt(opt, ref_fid_fn)
             fid_util.compute_fid_ref_stat(ref_opt, log)
+        else:
+            log.info(f"Using existing validation statistics for FID from {ref_fid_fn}.")
 
     # load npz file
     ref_fid = np.load(ref_fid_fn)
     ref_mu, ref_sigma = ref_fid['mu'], ref_fid['sigma']
     return ref_fid_fn, ref_mu, ref_sigma
+
 
 def log_metrices(opt):
     # setup
@@ -165,25 +187,37 @@ def log_metrices(opt):
 
     log.info(f"======== Compute metrices: {opt.ckpt=}, {opt.mode=} ========")
 
-    # find all recon pt files
-    recon_imgs_pts = find_recon_imgs_pts(opt, log)
-    log.info(f"Found {len(recon_imgs_pts)} pt files={[pt.name for pt in recon_imgs_pts]}")
-
-    # build torch array
-    numpy_arr, numpy_label_arr = build_numpy_data(log, recon_imgs_pts)
-    log.info(f"Collected {numpy_arr.shape=}, {numpy_label_arr.shape=}!")
-
-    # compute accu
-    accu = compute_accu(opt, numpy_arr, numpy_label_arr)
-    log.info(f"Accuracy={accu:.3f}!")
-
     # load ref fid stat
     ref_fid_fn, ref_mu, ref_sigma = get_ref_fid(opt, log)
     log.info(f"Loaded FID reference statistics from {ref_fid_fn}!")
 
-    # compute fid
+    # process recon images
+    recon_imgs_pts = find_imgs_pts(opt, log, name='recon')
+    log.info(f"Found {len(recon_imgs_pts)} recon pt files={[pt.name for pt in recon_imgs_pts]}")
+    numpy_arr, numpy_label_arr = build_numpy_data(log, recon_imgs_pts)
+    log.info(f"Collected {numpy_arr.shape=}, {numpy_label_arr.shape=}!")
+
+    # compute fid for recon images
     fid = fid_util.compute_fid_from_numpy(numpy_arr, ref_mu, ref_sigma, mode=opt.mode)
-    log.info(f"FID(w.r.t. {ref_fid_fn=})={fid:.1f}!")
+    log.info(f"Reconstruction FID(w.r.t. {ref_fid_fn=})={fid:.2f}!")
+
+    # check and process corrupt images
+    corrupt_imgs_pts = find_imgs_pts(opt, log, name='corrupt')
+    if corrupt_imgs_pts:
+        log.info(f"Found {len(corrupt_imgs_pts)} corrupt pt files={[pt.name for pt in corrupt_imgs_pts]}")
+        corrupt_numpy_arr, _ = build_numpy_data(log, corrupt_imgs_pts)
+        log.info(f"Collected corrupt images {corrupt_numpy_arr.shape=}")
+
+        # compute fid for corrupt images
+        corrupt_fid = fid_util.compute_fid_from_numpy(corrupt_numpy_arr, ref_mu, ref_sigma, mode=opt.mode)
+        log.info(f"Corrupt FID(w.r.t. {ref_fid_fn=})={corrupt_fid:.2f}!")
+    else:
+        log.info("No corrupt images found.")
+
+    # Commenting out accuracy calculation for reconstruction images
+    # accu = compute_accu(opt, numpy_arr, numpy_label_arr)
+    # log.info(f"Accuracy={accu:.3f}!")
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
