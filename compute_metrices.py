@@ -128,7 +128,11 @@ def build_numpy_data(log, recon_imgs_pts):
     label_arr = torch.cat(label_arr, dim=0)
     assert len(arr) == len(label_arr)
 
-    # converet to numpy
+    # Check the range of the data
+    min_val, max_val = arr.min(), arr.max()
+    log.info(f"Data range before conversion: min = {min_val}, max = {max_val}")
+
+    # Convert to numpy
     numpy_arr = convert_to_numpy(arr)
     numpy_label_arr = label_arr.cpu().numpy()
     return numpy_arr, numpy_label_arr
