@@ -25,6 +25,7 @@ from i2sb import download
 
 import colored_traceback.always
 from ipdb import set_trace as debug
+from tqdm import tqdm
 
 RESULT_DIR = Path("results")
 ADM_IMG256_FID_TRAIN_REF_CKPT = "https://openaipublic.blob.core.windows.net/diffusion/jul-2021/ref_batches/imagenet/256/VIRTUAL_imagenet256_labeled.npz"
@@ -131,13 +132,15 @@ def build_numpy_data(log, recon_imgs_pts):
     min_val_before, max_val_before = arr[:100].min(), arr[:100].max()
     log.info(f"Data range before normalization: min = {min_val_before}, max = {max_val_before}")
 
-    # Rescale and normalize the entire batch
-    min_vals = arr.view(arr.size(0), -1).min(dim=1, keepdim=True)[0]
-    max_vals = arr.view(arr.size(0), -1).max(dim=1, keepdim=True)[0]
-    
-    # Rescale to [0, 1] and normalize to [-1, 1]
-    arr_rescaled = (arr - min_vals.view(-1, 1, 1, 1)) / (max_vals - min_vals).view(-1, 1, 1, 1)
-    arr_normalized = arr_rescaled * 2 - 1
+    # In-place normalization of each image in arr
+    for i in tqdm(range(len(arr))):
+        min_val = arr[i].view(-1).min()
+        max_val = arr[i].view(-1).max()
+        # Rescale to [0, 1] and normalize to [-1, 1] in place
+        arr[i] = 2 * ((arr[i] - min_val) / (max_val - min_val)) - 1
+
+    # arr is now normalized in place, so arr_normalized is just arr
+    arr_normalized = arr
 
     # Check the range of the data after normalization
     min_val_after, max_val_after = arr_normalized[:100].min(), arr_normalized[:100].max()
