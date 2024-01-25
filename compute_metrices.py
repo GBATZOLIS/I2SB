@@ -25,7 +25,9 @@ from i2sb import download
 
 import colored_traceback.always
 from ipdb import set_trace as debug
+
 from tqdm import tqdm
+import gc
 
 RESULT_DIR = Path("results")
 ADM_IMG256_FID_TRAIN_REF_CKPT = "https://openaipublic.blob.core.windows.net/diffusion/jul-2021/ref_batches/imagenet/256/VIRTUAL_imagenet256_labeled.npz"
@@ -131,7 +133,7 @@ def build_numpy_data(log, recon_imgs_pts):
     # Check the range of the data before normalization
     min_val_before, max_val_before = arr[:100].min(), arr[:100].max()
     log.info(f"Data range before normalization: min = {min_val_before}, max = {max_val_before}")
-
+    
     # In-place normalization of each image in arr
     for i in tqdm(range(len(arr))):
         min_val = arr[i].view(-1).min()
@@ -240,6 +242,10 @@ def log_metrices(opt):
     # compute fid for recon images
     fid = fid_util.compute_fid_from_numpy(numpy_arr, ref_mu, ref_sigma, mode=opt.mode)
     log.info(f"Reconstruction FID(w.r.t. {ref_fid_fn=})={fid:.2f}!")
+
+    # Delete numpy_arr and numpy_label_arr to free memory
+    del numpy_arr, numpy_label_arr
+    gc.collect()
 
     # check and process corrupt images
     corrupt_imgs_pts = find_imgs_pts(opt, log, name='corrupt')

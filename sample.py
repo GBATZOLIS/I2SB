@@ -188,6 +188,9 @@ def main(opt):
     num = 0
     for loader_itr, out in enumerate(val_loader):
 
+        if loader_itr > 20:
+            break
+
         corrupt_img, x1, mask, cond, y = compute_batch(ckpt_opt, corrupt_type, corrupt_method, out)
 
         xs, _ = runner.ddpm_sampling(
