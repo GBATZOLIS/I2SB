@@ -115,7 +115,6 @@ def find_imgs_pts(opt, log, name = 'recon'):
     assert len(recon_imgs_pts) > 0, f"Found 0 file that matches '{str(sample_dir)}/{name}_*.pt'!"
     return recon_imgs_pts
 
-
 def build_numpy_data(log, recon_imgs_pts):
     arr = []
     label_arr = []
@@ -128,8 +127,42 @@ def build_numpy_data(log, recon_imgs_pts):
     label_arr = torch.cat(label_arr, dim=0)
     assert len(arr) == len(label_arr)
 
+    # Check the range of the data before normalization
+    min_val_before, max_val_before = arr[:100].min(), arr[:100].max()
+    log.info(f"Data range before normalization: min = {min_val_before}, max = {max_val_before}")
+
+    # Rescale and normalize the entire batch
+    min_vals = arr.view(arr.size(0), -1).min(dim=1, keepdim=True)[0]
+    max_vals = arr.view(arr.size(0), -1).max(dim=1, keepdim=True)[0]
+    
+    # Rescale to [0, 1] and normalize to [-1, 1]
+    arr_rescaled = (arr - min_vals.view(-1, 1, 1, 1)) / (max_vals - min_vals).view(-1, 1, 1, 1)
+    arr_normalized = arr_rescaled * 2 - 1
+
+    # Check the range of the data after normalization
+    min_val_after, max_val_after = arr_normalized[:100].min(), arr_normalized[:100].max()
+    log.info(f"Data range after normalization: min = {min_val_after}, max = {max_val_after}")
+
+    # Convert to numpy
+    numpy_arr = convert_to_numpy(arr_normalized)
+    numpy_label_arr = label_arr.cpu().numpy()
+    return numpy_arr, numpy_label_arr
+
+
+def build_numpy_data_old(log, recon_imgs_pts):
+    arr = []
+    label_arr = []
+    for pt in recon_imgs_pts:
+        out = torch.load(pt, map_location="cpu")
+        arr.append(out['arr'])
+        label_arr.append(out['label_arr'])
+        log.info(f"pt file {str(pt.name)} contains {len(out['label_arr'])} data!")
+    arr = torch.cat(arr, dim=0)
+    label_arr = torch.cat(label_arr, dim=0)
+    assert len(arr) == len(label_arr)
+
     # Check the range of the data
-    min_val, max_val = arr.min(), arr.max()
+    min_val, max_val = arr[:100].min(), arr[:100].max()
     log.info(f"Data range before conversion: min = {min_val}, max = {max_val}")
 
     # Convert to numpy
