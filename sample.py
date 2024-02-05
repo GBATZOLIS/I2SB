@@ -11,7 +11,7 @@ import argparse
 import random
 from pathlib import Path
 from easydict import EasyDict as edict
-
+import lpips
 import numpy as np
 
 import torch
@@ -32,6 +32,8 @@ import colored_traceback.always
 from ipdb import set_trace as debug
 
 RESULT_DIR = Path("results")
+
+os.environ["CUDA_VISIBLE_DEVICES"] = '3'
 
 def set_seed(seed):
     # https://github.com/pytorch/pytorch/issues/7068
@@ -150,63 +152,77 @@ def compute_batch(ckpt_opt, corrupt_type, corrupt_method, out):
 def main(opt):
     log = Logger(opt.global_rank, ".log")
 
-    # get (default) ckpt option
+    # Get (default) checkpoint option
     ckpt_opt = ckpt_util.build_ckpt_option(opt, log, RESULT_DIR / opt.ckpt)
     corrupt_type = ckpt_opt.corrupt
-    nfe = opt.nfe or ckpt_opt.interval-1
+    nfe = opt.nfe or ckpt_opt.interval - 1
 
-    # build corruption method
+    # Build corruption method
     corrupt_method = build_corruption(opt, log, corrupt_type=corrupt_type)
 
-    # build imagenet val dataset
+    # Build ImageNet validation dataset
     val_dataset = build_val_dataset(opt, log, corrupt_type)
     n_samples = len(val_dataset)
 
-    # build dataset per gpu and loader
+    # Build dataset per GPU and loader
     subset_dataset = build_subset_per_gpu(opt, val_dataset, log)
     val_loader = DataLoader(subset_dataset,
-        batch_size=opt.batch_size, shuffle=False, pin_memory=True, num_workers=1, drop_last=False,
-    )
+                            batch_size=opt.batch_size, shuffle=False, pin_memory=True, num_workers=1, drop_last=False)
 
-    # build runner
+    # Build runner
     runner = Runner(ckpt_opt, log, save_opt=False)
 
-    # handle use_fp16 for ema
+    # Handle use_fp16 for EMA
     if opt.use_fp16:
-        runner.ema.copy_to() # copy weight from ema to net
+        runner.ema.copy_to()  # Copy weight from EMA to net
         runner.net.diffusion_model.convert_to_fp16()
-        runner.ema = ExponentialMovingAverage(runner.net.parameters(), decay=0.99) # re-init ema with fp16 weight
+        runner.ema = ExponentialMovingAverage(runner.net.parameters(), decay=0.99)  # Re-init EMA with fp16 weight
 
-    # create save folder
+    # Create save folder
     corrupt_imgs_fn = get_image_save_path(opt, 'corrupt', nfe)
     recon_imgs_fn = get_image_save_path(opt, 'recon', nfe)
     log.info(f"Recon images will be saved to {recon_imgs_fn}!")
 
-    corrupt_imgs = []  # Add this near where recon_imgs is defined
+    corrupt_imgs = []
     recon_imgs = []
+    real_imgs = []  # Store real images
     ys = []
     num = 0
-    for loader_itr, out in enumerate(val_loader):
 
-        if loader_itr > 20:
+    # Initialize lists to collect LPIPS scores
+    lpips_model = lpips.LPIPS(net='alex').to(opt.device)
+    lpips_scores_corrupt = []
+    lpips_scores_recon = []
+
+    for loader_itr, out in enumerate(val_loader):
+        if loader_itr > 5:
             break
 
+        real, _ = out
+        real = real.to(opt.device)
         corrupt_img, x1, mask, cond, y = compute_batch(ckpt_opt, corrupt_type, corrupt_method, out)
 
         xs, _ = runner.ddpm_sampling(
-            ckpt_opt, x1, mask=mask, cond=cond, clip_denoise=opt.clip_denoise, nfe=nfe, verbose=opt.n_gpu_per_node==1
+            ckpt_opt, x1, mask=mask, cond=cond, clip_denoise=opt.clip_denoise, nfe=nfe, verbose=opt.n_gpu_per_node == 1
         )
         recon_img = xs[:, 0, ...].to(opt.device)
 
         assert recon_img.shape == corrupt_img.shape
 
-        if loader_itr == 0 and opt.global_rank == 0: # debug
+        if loader_itr == 0 and opt.global_rank == 0:  # Debug
             os.makedirs(".debug", exist_ok=True)
-            tu.save_image((corrupt_img+1)/2, ".debug/corrupt.png")
-            tu.save_image((recon_img+1)/2, ".debug/recon.png")
+            tu.save_image((corrupt_img + 1) / 2, ".debug/corrupt.png")
+            tu.save_image((recon_img + 1) / 2, ".debug/recon.png")
             log.info("Saved debug images!")
 
-        # [-1,1]
+        # Compute LPIPS scores for corrupted and reconstructed images
+        lpips_score_corrupt = lpips_model(real, corrupt_img).mean()
+        lpips_score_recon = lpips_model(real, recon_img).mean()
+        
+        # Aggregate scores locally (per GPU/process)
+        lpips_scores_corrupt.append(lpips_score_corrupt.item())
+        lpips_scores_recon.append(lpips_score_recon.item())
+
         gathered_recon_img = collect_all_subset(recon_img, log)
         recon_imgs.append(gathered_recon_img)
 
@@ -214,10 +230,11 @@ def main(opt):
         gathered_y = collect_all_subset(y, log)
         ys.append(gathered_y)
 
-        # Collect and store original images
+        gathered_real_img = collect_all_subset(real, log)  # Collect real images
+        real_imgs.append(gathered_real_img)  # Append to real images list
+
         gathered_corrupt_img = collect_all_subset(corrupt_img, log)
         corrupt_imgs.append(gathered_corrupt_img)
-
 
         num += len(gathered_recon_img)
         log.info(f"Collected {num} recon images!")
@@ -227,20 +244,69 @@ def main(opt):
 
     corrupt_arr = torch.cat(corrupt_imgs, axis=0)[:n_samples]
     arr = torch.cat(recon_imgs, axis=0)[:n_samples]
+    real_arr = torch.cat(real_imgs, axis=0)[:n_samples]  # Concatenate real images
     label_arr = torch.cat(ys, axis=0)[:n_samples]
 
+    # After the loop, reduce the scores across all GPUs
+    # Convert lists to tensors for reduction
+    lpips_scores_corrupt_tensor = torch.tensor(lpips_scores_corrupt, device=opt.device)
+    lpips_scores_recon_tensor = torch.tensor(lpips_scores_recon, device=opt.device)
+
+    # Sum scores across all GPUs
+    dist.reduce(lpips_scores_corrupt_tensor, dst=0, op=dist.ReduceOp.SUM)
+    dist.reduce(lpips_scores_recon_tensor, dst=0, op=dist.ReduceOp.SUM)
+
+    # Handle global rank 0 specific operations
     if opt.global_rank == 0:
+        N=5
+        # Initialize a list to hold the images for the grid
+        images_for_grid = []
+
+        # Loop through the first N samples and add real, corrupt, and recon images to the list
+        for i in range(N):
+            images_for_grid.append(real_arr[i])
+            images_for_grid.append(corrupt_arr[i])
+            images_for_grid.append(arr[i])
+
+        # Stack the list of images into a single tensor
+        images_tensor = torch.stack(images_for_grid)
+
+        # Create the grid with N rows, each row has 3 images
+        # Since we're creating N rows with 3 images per row, set nrow=3
+        image_grid = tu.make_grid(images_tensor, nrow=3, padding=2, normalize=True, value_range=(-1, 1))
+
+        # Save the grid to a file
+        save_path = ".debug/comparison.png"
+        tu.save_image(image_grid, save_path)
+        
+        log.info(f"Saved comparison grid to {save_path}")
+    
+        # Only the master process computes the average
+        avg_lpips_corrupt = lpips_scores_corrupt_tensor.sum().item() / (len(lpips_scores_corrupt) * opt.global_size)
+        avg_lpips_recon = lpips_scores_recon_tensor.sum().item() / (len(lpips_scores_recon) * opt.global_size)
+        
+        # Log the averaged LPIPS scores
+        log.info(f"Average LPIPS score for corruption: {avg_lpips_corrupt}")
+        log.info(f"Average LPIPS score for reconstruction: {avg_lpips_recon}")
+
         torch.save({"arr": arr, "label_arr": label_arr}, recon_imgs_fn)
         log.info(f"Save at {recon_imgs_fn}")
+
         torch.save({"arr": corrupt_arr, "label_arr": label_arr}, corrupt_imgs_fn)
         log.info(f"Save corrupted images at {corrupt_imgs_fn}")
 
-    dist.barrier()
+        # Print min and max values for all types of images
+        recon_min, recon_max = torch.min(arr), torch.max(arr)
+        corrupt_min, corrupt_max = torch.min(corrupt_arr), torch.max(corrupt_arr)
+        real_min, real_max = torch.min(real_arr), torch.max(real_arr)
 
+        log.info(f"Minimum and maximum values of recon_arr: {recon_min}, {recon_max}")
+        log.info(f"Minimum and maximum values of corrupt_arr: {corrupt_min}, {corrupt_max}")
+        log.info(f"Minimum and maximum values of real images: {real_min}, {real_max}")
 
-    dist.barrier()
+    dist.barrier()  # Ensure synchronization before finishing
+    log.info(f"Sampling complete! Collect recon_imgs={arr.shape}, real_imgs={real_arr.shape}, ys={label_arr.shape}")
 
-    log.info(f"Sampling complete! Collect recon_imgs={arr.shape}, ys={label_arr.shape}")
 
 
 if __name__ == '__main__':

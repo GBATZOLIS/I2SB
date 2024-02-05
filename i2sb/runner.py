@@ -26,6 +26,7 @@ from .network import Image256Net
 from .diffusion import Diffusion
 
 from ipdb import set_trace as debug
+import lpips
 
 def build_optimizer_sched(opt, net, log):
 
@@ -98,6 +99,9 @@ class Runner(object):
         self.ema.to(opt.device)
 
         self.log = log
+
+        #evaluation
+        self.lpips_model = lpips.LPIPS(net='vgg')
 
     def compute_label(self, step, x0, xt):
         """ Eq 12 """
@@ -211,7 +215,7 @@ class Runner(object):
                 if opt.distributed:
                     torch.distributed.barrier()
 
-            if (it+1) == 500 or (it+1) % 3000 == 0: # 0, 0.5k, 3k, 6k 9k
+            if (it+1) == 500 or (it+1) % 10000 == 0: # 0, 0.5k, 3k, 6k 9k
                 net.eval()
                 self.evaluation(opt, it+1, val_loader, corrupt_method)
                 net.train()
@@ -256,53 +260,62 @@ class Runner(object):
 
         return xs, pred_x0
 
+
     @torch.no_grad()
-    def evaluation(self, opt, it, val_loader, corrupt_method):
+    def evaluation(self, opt, it, val_loader, corrupt_method, num_batches=65):
+        def log_image(tag, img, nrow=10):
+            self.writer.add_image(it, tag, tu.make_grid((img+1)/2, nrow=nrow)) # [-1,1] -> [0,1]
 
         log = self.log
         log.info(f"========== Evaluation started: iter={it} ==========")
 
-        img_clean, img_corrupt, mask, y, cond = self.sample_batch(opt, val_loader, corrupt_method)
+        accu_scores = []
+        lpips_scores_recon = []
+        lpips_scores_corrupt = []
 
-        x1 = img_corrupt.to(opt.device)
+        for batch_idx in range(num_batches):
+            img_clean, img_corrupt, mask, y, cond = self.sample_batch(opt, val_loader, corrupt_method)
 
-        xs, pred_x0s = self.ddpm_sampling(
-            opt, x1, mask=mask, cond=cond, clip_denoise=opt.clip_denoise, verbose=opt.global_rank==0
-        )
+            x1 = img_corrupt.to(opt.device)
+            xs, pred_x0s = self.ddpm_sampling(
+                opt, x1, mask=mask, cond=cond, clip_denoise=opt.clip_denoise, verbose=opt.global_rank==0
+            )
 
-        log.info("Collecting tensors ...")
-        img_clean   = all_cat_cpu(opt, log, img_clean)
-        img_corrupt = all_cat_cpu(opt, log, img_corrupt)
-        y           = all_cat_cpu(opt, log, y)
-        xs          = all_cat_cpu(opt, log, xs)
-        pred_x0s    = all_cat_cpu(opt, log, pred_x0s)
+            # Convert images to [0,1] range for LPIPS
+            img_clean_for_lpips = (img_clean + 1) / 2
+            img_corrupt_for_lpips = (img_corrupt + 1) / 2
+            img_recon_for_lpips = (xs[:, 0, ...] + 1) / 2
 
-        batch, len_t, *xdim = xs.shape
-        assert img_clean.shape == img_corrupt.shape == (batch, *xdim)
-        assert xs.shape == pred_x0s.shape
-        assert y.shape == (batch,)
-        log.info(f"Generated recon trajectories: size={xs.shape}")
+            # Calculate LPIPS distances
+            lpips_dist_recon = self.lpips_model(img_recon_for_lpips, img_clean_for_lpips).mean().item()
+            lpips_dist_corrupt = self.lpips_model(img_corrupt_for_lpips, img_clean_for_lpips).mean().item()
+            lpips_scores_recon.append(lpips_dist_recon)
+            lpips_scores_corrupt.append(lpips_dist_corrupt)
 
-        def log_image(tag, img, nrow=10):
-            self.writer.add_image(it, tag, tu.make_grid((img+1)/2, nrow=nrow)) # [1,1] -> [0,1]
-
-        def log_accuracy(tag, img):
-            pred = self.resnet(img.to(opt.device)) # input range [-1,1]
+            # Calculate accuracy
+            pred = self.resnet(img_recon_for_lpips.to(opt.device)) # Assuming img_recon_for_lpips is in the correct format
             accu = self.accuracy(pred, y.to(opt.device))
-            self.writer.add_scalar(it, tag, accu)
+            accu_scores.append(accu)
 
-        log.info("Logging images ...")
-        img_recon = xs[:, 0, ...]
-        log_image("image/clean",   img_clean)
-        log_image("image/corrupt", img_corrupt)
-        log_image("image/recon",   img_recon)
-        log_image("debug/pred_clean_traj", pred_x0s.reshape(-1, *xdim), nrow=len_t)
-        log_image("debug/recon_traj",      xs.reshape(-1, *xdim),      nrow=len_t)
+            if batch_idx == 0:  # Log images only for the first batch
+                log_image("image/clean", img_clean)
+                log_image("image/corrupt", img_corrupt)
+                log_image("image/recon", img_recon_for_lpips)
+                log_image("debug/pred_clean_traj", pred_x0s.reshape(-1, *xs.shape[2:]), nrow=xs.shape[1])
+                log_image("debug/recon_traj", xs.reshape(-1, *xs.shape[2:]), nrow=xs.shape[1])
 
-        log.info("Logging accuracies ...")
-        log_accuracy("accuracy/clean",   img_clean)
-        log_accuracy("accuracy/corrupt", img_corrupt)
-        log_accuracy("accuracy/recon",   img_recon)
+        # Calculate mean scores
+        mean_accu = sum(accu_scores) / len(accu_scores)
+        mean_lpips_recon = sum(lpips_scores_recon) / len(lpips_scores_recon)
+        mean_lpips_corrupt = sum(lpips_scores_corrupt) / len(lpips_scores_corrupt)
 
+        # Log mean scores
+        self.writer.add_scalar("accuracy/mean_recon", mean_accu, it)
+        self.writer.add_scalar("LPIPS/mean_recon_vs_clean", mean_lpips_recon, it)
+        self.writer.add_scalar("LPIPS/mean_corrupt_vs_clean", mean_lpips_corrupt, it)
+
+        log.info(f"Mean accuracy over {num_batches} batches: {mean_accu}")
+        log.info(f"Mean LPIPS (recon vs clean) over {num_batches} batches: {mean_lpips_recon}")
+        log.info(f"Mean LPIPS (corrupt vs clean) over {num_batches} batches: {mean_lpips_corrupt}")
         log.info(f"========== Evaluation finished: iter={it} ==========")
         torch.cuda.empty_cache()
