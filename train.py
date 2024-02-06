@@ -29,7 +29,7 @@ from i2sb import Runner, download_ckpt
 import colored_traceback.always
 from ipdb import set_trace as debug
 
-os.environ["CUDA_VISIBLE_DEVICES"] = '0,1,2,3'
+os.environ["CUDA_VISIBLE_DEVICES"] = '0,1'
 
 RESULT_DIR = Path("results")
 
